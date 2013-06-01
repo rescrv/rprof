@@ -35,6 +35,7 @@ from __future__ import with_statement
 
 import collections
 import errno
+import itertools
 import os.path
 import re
 import subprocess
@@ -61,7 +62,7 @@ def collect_trace(profile, cmd, pid):
         raise e
 
 
-def profile(cmds, profile='profile.{pid}', interval=5):
+def profile(cmds, profile='profile.{pid}', interval=1):
     try:
         p = subprocess.Popen(cmds)
     except OSError as e:
@@ -96,7 +97,7 @@ skip1_re = re.compile(r'^$')
 skip2_re = re.compile(r'^Using host .+? library "[^"]*".$')
 skip3_re = re.compile(r'^\[Thread debugging using .+? enabled\]$')
 skip4_re = re.compile(r'^\[New Thread 0x[0-9a-f]+ \(LWP [0-9]+\)\]$')
-skip5_re = re.compile(r'^.+? \(.*\) at .+?$')
+skip5_re = re.compile(r'^.+?\s+\(.*\) (?:from|at) .+?$')
 skip6_re = re.compile(r'^warning: no loadable sections found in added symbol-file system-supplied DSO at 0x[0-9a-f]+$')
 skip7_re = re.compile(r'^.+?: No such file or directory.$')
 
@@ -104,33 +105,68 @@ skip7_re = re.compile(r'^.+?: No such file or directory.$')
 Stack = collections.namedtuple('Stack', ('thread', 'frames'))
 
 
+def generate_stack_ids(traces):
+    ids = {}
+    counter = 0
+    for t in traces:
+        for s in t:
+            if s.frames not in ids:
+                ids[s.frames] = counter
+                counter += 1
+    return ids, dict([(v, k) for k, v in ids.iteritems()])
+
+
+def filter_traces(traces, frames):
+    ret = []
+    for t in traces:
+        for s in t:
+            if frames == s.frames:
+                ret.append(t)
+                break
+    return ret
+
+
+def generate_histogram(traces):
+    stacks = [s for s in itertools.chain(*traces)]
+    frames = [s.frames for s in stacks]
+    counts = [(c, f) for f, c in collections.Counter(frames).iteritems()]
+    counts.sort()
+    return counts
+
+
 def annotate(profile):
     f = open(profile)
-    stack = None
     traces = []
+    trace = []
+    stack = None
+    addrs = []
     for line in f:
         line = line.strip()
         match = trace_re.match(line)
         if match:
-            # trace
+            if stack is not None:
+                trace.append(Stack(stack, tuple(addrs)))
+            if trace:
+                traces.append(tuple(trace))
+            trace = []
+            stack = None
+            addrs = []
             continue
         match = thread_re.match(line)
         if match:
             if stack is not None:
-                traces.append(Stack(stack.thread, tuple(stack.frames)))
-            stack = Stack(match.groups()[0], [])
+                trace.append(Stack(stack, tuple(addrs)))
+            stack = match.groups()[0]
+            addrs = []
             continue
         # Parse stack frames
         match = None
         if match is None: match = frame1_re.match(line)
         if match is None: match = frame2_re.match(line)
         if match is None: match = frame3_re.match(line)
-        #if match is None: match = frame4_re.match(line)
-        #if match is None: match = frame5_re.match(line)
         if match:
             assert(len(match.groups()) > 0)
-            if stack is not None:
-                stack.frames.append(match.groups()[0])
+            addrs.append(match.groups()[0])
             continue
         # Skip information we don't care about
         if skip1_re.match(line): continue;
@@ -141,18 +177,22 @@ def annotate(profile):
         if skip6_re.match(line): continue;
         if skip7_re.match(line): continue;
         print('rprof: unhandled output from gdb: %r' % line, file=sys.stderr)
-    counts = [(c, f) for f, c in collections.Counter([t.frames for t in traces]).iteritems()]
-    counts.sort()
+    if stack is not None:
+        trace.append(Stack(stack, tuple(addrs)))
+    if trace:
+        traces.append(tuple(trace))
+    forward_ids, reverse_ids = generate_stack_ids(traces)
+    counts = generate_histogram(traces)
     histwidth = len(str(counts[-1][0])) if counts else 0
     blankline = False
     for count, frames in counts:
         if blankline:
             print()
         blankline = True
-        per_thread = [t.thread for t in traces if t.frames == frames]
+        per_thread = [s.thread for s in itertools.chain(*traces) if s.frames == frames]
         per_thread = ', '.join(['{0}: {1}'.format(*x) for x in
                                 sorted(collections.Counter(per_thread).iteritems())])
-        print('{0:{1}}  {2}'.format(count, histwidth, per_thread))
+        print('{0:{1}}  id = {2} | threads = {3}'.format(count, histwidth, forward_ids[frames], per_thread))
         fwidth = len(str(len(frames) - 1))
         for i, f in enumerate(frames):
             f = f.decode('ascii', errors='ignore')
