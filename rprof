@@ -135,10 +135,32 @@ def generate_histogram(traces):
     return counts
 
 
+def generate_cumulative_counts(counts):
+    if not len(counts):
+        return counts
+    def sort_key(x):
+        count, frames = x
+        return 0 - len(frames)
+    counts.sort(key=sort_key)
+    frame_length = len(counts[0][1])
+    cumulative_counts = collections.defaultdict(int)
+    for c in counts:
+        count, frames = c
+        assert frame_length >= len(frames)
+        frame_length = len(frames)
+        while len(frames) > 0:
+            cumulative_counts[frames] += count
+            frames = frames[1:]
+    counts = [(v, k) for k, v in cumulative_counts.iteritems()]
+    counts.sort()
+    return counts
+
+
 def annotate(args):
     parser = argparse.ArgumentParser(prog='rprof annotate')
     parser.add_argument('profile', help='output of rprof profile', type=str)
     parser.add_argument('--context', type=int, default=None)
+    parser.add_argument('--cumulative', action='store_const', const=True, default=False)
     args = parser.parse_args(args)
     f = open(args.profile)
     traces = []
@@ -190,6 +212,9 @@ def annotate(args):
     if args.context is not None:
         traces = filter_traces(traces, reverse_ids[args.context])
     counts = generate_histogram(traces)
+    if args.cumulative:
+        counts = generate_cumulative_counts(counts)
+    print(counts[0:2])
     histwidth = len(str(counts[-1][0])) if counts else 0
     blankline = False
     for count, frames in counts:
@@ -199,7 +224,7 @@ def annotate(args):
         per_thread = [s.thread for s in itertools.chain(*traces) if s.frames == frames]
         per_thread = ', '.join(['{0}: {1}'.format(*x) for x in
                                 sorted(collections.Counter(per_thread).iteritems())])
-        print('{0:{1}}  id = {2} | threads = {3}'.format(count, histwidth, forward_ids[frames], per_thread))
+        print('{0:{1}}  id = {2} | threads = {3}'.format(count, histwidth, forward_ids.get(frames, 'c'), per_thread))
         fwidth = len(str(len(frames) - 1))
         for i, f in enumerate(frames):
             f = f.decode('ascii', errors='ignore')
