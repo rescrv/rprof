@@ -44,13 +44,13 @@ import sys
 import time
 
 
-def collect_trace(profile, cmd, pid):
+def collect_trace(profile, pid):
     try:
         gdb = ['gdb', '-ex', 'set pagination 0',
                       '-ex', 'set print demangle off',
                       '-ex', 'print "start another capture"',
                       '-ex', 'thread apply all bt',
-                      '-batch', str(cmd), str(pid)]
+                      '-batch', '-p', str(pid)]
         rc = subprocess.call(gdb, stdout=profile, stderr=profile)
         if rc != 0:
             print('rprof: gdb failed; see the log for details', file=sys.stderr)
@@ -63,7 +63,7 @@ def collect_trace(profile, cmd, pid):
         raise e
 
 
-def profile(cmds, profile='profile.{pid}', interval=1):
+def profile(cmds, profile='profile.{pid}', interval=5):
     try:
         p = subprocess.Popen(cmds)
     except OSError as e:
@@ -76,8 +76,38 @@ def profile(cmds, profile='profile.{pid}', interval=1):
     g = open(profile_name, 'w')
     success = True
     while p.poll() is None:
-        if not collect_trace(g, cmds[0], p.pid):
+        if not collect_trace(g, p.pid):
             p.wait()
+            success = False
+        else:
+            time.sleep(interval)
+    g.flush()
+    g.close()
+    if success:
+        print('rprof: succeeded; profile at %r' % profile_name, file=sys.stderr)
+    else:
+        print('rprof: encountered an error; profile is incomplete', file=sys.stderr)
+
+
+def still_running(pid):
+    try:
+        os.getpgid(int(pid))
+        return True
+    except OSError as e:
+        if e == errno.ESRCH:
+            return False
+        raise e
+
+
+def attach(pid, profile='profile.{pid}', interval=1):
+    params = {'pid': pid}
+    profile_name = profile.format(**params)
+    if os.path.exists(profile_name):
+        print('rprof: overwriting %r' % profile_name, file=sys.stderr)
+    g = open(profile_name, 'w')
+    success = True
+    while still_running(pid):
+        if not collect_trace(g, pid):
             success = False
         else:
             time.sleep(interval)
@@ -234,8 +264,10 @@ def annotate(args):
 if __name__ == '__main__':
     args = sys.argv[1:]
     assert(args)
-    assert(args[0] in ('profile', 'analyze'))
+    assert(args[0] in ('profile', 'attach', 'analyze'))
     if args[0] == 'profile':
         profile(args[1:])
+    if args[0] == 'attach':
+        attach(args[1])
     if args[0] == 'analyze':
         annotate(args[1:])
